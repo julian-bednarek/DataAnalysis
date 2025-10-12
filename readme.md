@@ -1,4 +1,9 @@
-# Setup venv
+# Finding Waldo using autoencoders
+
+
+## Env setup
+
+### Setup venv
 
 ```sh
 python -m venv
@@ -10,7 +15,7 @@ or
 virtualenv venv
 ```
 
-# Activate venv
+### Activate venv
 
 For unix systems:
 ```sh
@@ -21,8 +26,16 @@ For windows:
 venv\Scripts\Activate.ps1
 ```
 
-# Install requirements
+### Install requirements
 
 ```sh
 pip install -r requirements.txt
 ```
+
+### Download dataset
+
+```sh
+https://www.kaggle.com/datasets/residentmario/wheres-waldo
+```
+
+and put it in `datasets/` directory
