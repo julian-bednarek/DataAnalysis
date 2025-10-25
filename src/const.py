@@ -7,14 +7,14 @@ import torch
 class ImageTypes(Enum):
     """Types of images in our dataset."""
 
-    NORMAL = ""
-    BW = "-bw"
-    GRAY = "-gray"
+    NORMAL = {"file": "", "no_channels": 3}
+    BW = {"file": "-bw", "no_channels": 1}
+    GRAY = {"file": "-gray", "no_channels": 1}
 
 
-IMAGE_SIZE = 64
+IMAGE_SIZE = 128
 IMAGE_TYPE = ImageTypes.NORMAL.value
 IMAGE_EXTENSION = ".jpg"
-TRAIN_DATA_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE}/notwaldo"
-TEST_DATA_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE}/waldo"
+TRAIN_DATA_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE['file']}/notwaldo"
+TEST_DATA_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE['file']}/waldo"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
