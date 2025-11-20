@@ -1,267 +1,286 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# ### Imports
-
-from torchvision import transforms
-from torch.utils.data import DataLoader, Dataset
 import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
 from PIL import Image
+from sklearn.metrics import roc_auc_score, confusion_matrix, ConfusionMatrixDisplay
+from scipy.stats import scoreatpercentile
+
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-
-# ### Load constants
+from torch.utils.data import DataLoader, Dataset, RandomSampler
+from torchvision import transforms
+from torchvision.utils import save_image
 
 from const import *
+from models import ShallowConvAutoencoder
 
-# ## Train data augmentation
+# ==========================================
+# 1. CONFIGURATION
+# ==========================================
+
+Model = ShallowConvAutoencoder
+
+REAL_TRAIN_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE['file']}/waldo"
+REAL_TEST_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE['file']}/notwaldo"
+
+BATCH_SIZE: int = 32
+LEARNING_RATE: float = 1e-3
+NUM_EPOCHS: int = 200
+WEIGHT_DECAY: float = 1e-4
 
 TRAIN_TRANSFORM = transforms.Compose(
     [
         transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.RandomHorizontalFlip(),
+        transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(15),
         transforms.ToTensor(),
-        (
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-            if IMAGE_TYPE["no_channels"] == 3
-            else transforms.Normalize(mean=[0.5], std=[0.5])
-        ),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
     ]
 )
 
+TEST_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+    ]
+)
+
+# ==========================================
+# 2. DATASET
+# ==========================================
+
 
 class WaldoImageDataset(Dataset):
-    def __init__(self, root_dir, transform=None):
+    def __init__(self, root_dir, file_list=None, transform=None):
         self.root_dir = root_dir
         self.transform = transform
-        self.image_paths = [
-            os.path.join(root_dir, fname)
-            for fname in os.listdir(root_dir)
-            if fname.endswith(IMAGE_EXTENSION)
-        ]
+        if file_list:
+            self.image_paths = file_list
+        else:
+            self.image_paths = [
+                os.path.join(root_dir, fname)
+                for fname in os.listdir(root_dir)
+                if fname.endswith(IMAGE_EXTENSION)
+            ]
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
-        match IMAGE_TYPE["no_channels"]:
-            case 1:
-                image = Image.open(img_path).convert("L")  # Grayscale
-            case 3:
-                image = Image.open(img_path).convert("RGB")  # RGB
-            case _:
-                raise ValueError("Unsupported number of channels")
+        try:
+            image = Image.open(img_path).convert("RGB")
+        except Exception:
+            # Return dummy if broken
+            return torch.zeros(3, 64, 64), torch.zeros(3, 64, 64), img_path
 
         if self.transform:
             image = self.transform(image)
 
-        return image, image
+        # Return Path for debugging
+        return image, image, img_path
 
 
-def get_dataloaders(root_dir, transform, batch_size):
-    dataset = WaldoImageDataset(root_dir=root_dir, transform=transform)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+# ==========================================
+# 3. TRAINING
+# ==========================================
 
 
-from models import (
-    ThreePoolLayerConvAutoencoder,
-    ShallowConvAutoencoder,
-    UNetAutoencoder,
-)
+def train(model, data_root, epochs, device):
+    print(f"Preparing data from {data_root}...")
+    all_files = [
+        os.path.join(data_root, f)
+        for f in os.listdir(data_root)
+        if f.endswith(IMAGE_EXTENSION)
+    ]
+    random.shuffle(all_files)
 
-Model = ThreePoolLayerConvAutoencoder
+    val_count = max(2, int(0.1 * len(all_files)))
+    train_files = all_files[val_count:]
+    val_files = all_files[:val_count]
 
-BATCH_SIZE: int = 64
-LEARNING_RATE: float = 1e-3
-NUM_EPOCHS: int = 100
-NOISE_FACTOR: float = 0.1
-WEIGHT_DECAY: float = 5e-5
-
-
-def add_gaussian_noise(images, noise_factor):
-    noisy_images = images + noise_factor * torch.randn_like(images)
-    noisy_images = torch.clamp(noisy_images, -1.0, 1.0)
-    return noisy_images
-
-
-def train(model, data_root, transform, epochs, device):
-    dataset = WaldoImageDataset(root_dir=data_root, transform=transform)
-    train_size = int(0.8 * len(dataset))
-    train_dataset, _ = torch.utils.data.random_split(
-        dataset, [train_size, len(dataset) - train_size]
+    print(
+        f"Training on {len(train_files)} images. Validating on {len(val_files)} images."
     )
-    dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+
+    train_dataset = WaldoImageDataset(
+        data_root, file_list=train_files, transform=TRAIN_TRANSFORM
+    )
+    val_dataset = WaldoImageDataset(
+        data_root, file_list=val_files, transform=TEST_TRANSFORM
+    )
+
+    train_sampler = RandomSampler(train_dataset, replacement=True, num_samples=2000)
+    train_loader = DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler
+    )
+    val_loader = DataLoader(val_dataset, batch_size=len(val_dataset), shuffle=False)
 
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=15
+    )
+
     model.to(device)
+    best_val_loss = float("inf")
 
     for epoch in range(epochs):
-        for images in dataloader:
-            if isinstance(images, (list, tuple)):
-                images = images[0]
-            clean_images = images.to(device)
-
-            noisy_images = add_gaussian_noise(clean_images.clone(), NOISE_FACTOR)
+        model.train()
+        train_loss = 0.0
+        for images, _, _ in train_loader:
+            images = images.to(device)
             optimizer.zero_grad()
-            outputs = model(noisy_images)
-            loss = criterion(outputs, clean_images)
+            outputs = model(images)
+            loss = criterion(outputs, images)
             loss.backward()
             optimizer.step()
+            train_loss += loss.item()
 
-        print(f"Epoch [{epoch + 1}/{epochs}], Loss: {loss.item():.4f}")
+        avg_train_loss = train_loss / len(train_loader)
 
-    print("Training complete.")
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for val_images, _, _ in val_loader:
+                val_images = val_images.to(device)
+                val_outputs = model(val_images)
+                val_loss += criterion(val_outputs, val_images).item()
+
+        avg_val_loss = val_loss / len(val_loader)
+        scheduler.step(avg_val_loss)
+
+        saved_msg = ""
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), "best_waldo_model.pth")
+            saved_msg = "[Saved Best]"
+
+        if (epoch + 1) % 10 == 0:
+            print(
+                f"Epoch [{epoch+1}/{epochs}] | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} {saved_msg}"
+            )
+
+    print("Training complete. Loading best model.")
+    model.load_state_dict(torch.load("best_waldo_model.pth"))
     return model
 
 
-trained_model = train(
-    Model(
-        latent_dim=IMAGE_SIZE // 4,
-        image_size=IMAGE_SIZE,
-        channels=IMAGE_TYPE["no_channels"],
-    ),
-    TRAIN_DATA_PATH,
-    TRAIN_TRANSFORM,
-    NUM_EPOCHS,
-    DEVICE,
-)
-
-# ## Test data preparations
-
-TEST_TRANSFORM = transforms.Compose(
-    [
-        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-        transforms.ToTensor(),
-        (
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-            if IMAGE_TYPE["no_channels"] == 3
-            else transforms.Normalize(mean=[0.5], std=[0.5])
-        ),
-    ]
-)
+# ==========================================
+# 4. EVALUATION (DEBUG MODE)
+# ==========================================
 
 
-def get_test_dataloaders(normal_path, anomaly_path, transform, batch_size):
-    normal_dataset = WaldoImageDataset(root_dir=normal_path, transform=transform)
-    normal_loader = DataLoader(normal_dataset, batch_size=batch_size, shuffle=False)
-
-    anomaly_dataset = WaldoImageDataset(root_dir=anomaly_path, transform=transform)
-    anomaly_loader = DataLoader(anomaly_dataset, batch_size=batch_size, shuffle=False)
-
-    return normal_loader, anomaly_loader
-
-
-def calculate_reconstruction_errors(model, dataloader, device):
+def calculate_errors_with_filenames(model, dataloader, device):
     model.eval()
-    all_errors = []
+    errors = []
+    filenames = []
+    criterion = nn.MSELoss(reduction="none")
 
     with torch.no_grad():
-        for images, _ in dataloader:
+        for images, _, paths in dataloader:
             images = images.to(device)
-
             reconstructed = model(images)
-            mse_loss = F.mse_loss(reconstructed, images, reduction="none")
-            reconstruction_error = mse_loss.sum(dim=[1, 2, 3])
+            pixel_loss = criterion(reconstructed, images)
+            loss = pixel_loss.sum(dim=[1, 2, 3])
 
-            all_errors.extend(reconstruction_error.cpu().numpy())
+            errors.extend(loss.cpu().numpy())
+            filenames.extend(paths)
 
-    return np.array(all_errors)
-
-
-from scipy.stats import scoreatpercentile
-from sklearn.metrics import roc_auc_score, f1_score, confusion_matrix
-import matplotlib.pyplot as plt
-from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+    return np.array(errors), np.array(filenames)
 
 
-def evaluate_model(model, normal_loader, anomaly_loader, device):
-    # Calculate errors for both classes
-    normal_errors = calculate_reconstruction_errors(model, normal_loader, device)
-    print(
-        f"Normal Errors Stats: Mean={np.mean(normal_errors):.4f}, Std={np.std(normal_errors):.4f}, Max={np.max(normal_errors):.4f}"
+def evaluate(model, waldo_path, crowd_path, device):
+    waldo_set = WaldoImageDataset(waldo_path, transform=TEST_TRANSFORM)
+    crowd_set = WaldoImageDataset(crowd_path, transform=TEST_TRANSFORM)
+
+    waldo_loader = DataLoader(waldo_set, batch_size=32, shuffle=False)
+    crowd_loader = DataLoader(crowd_set, batch_size=32, shuffle=True)
+
+    print("\nCalculating Errors...")
+    waldo_errors, waldo_files = calculate_errors_with_filenames(
+        model, waldo_loader, device
     )
-    THRESHOLD = scoreatpercentile(normal_errors, 100)
-    anomaly_errors = calculate_reconstruction_errors(model, anomaly_loader, device)
-    print(
-        f"Anomaly Errors Stats: Mean={np.mean(anomaly_errors):.4f}, Std={np.std(anomaly_errors):.4f}, Min={np.min(anomaly_errors):.4f}"
-    )
+    crowd_errors, _ = calculate_errors_with_filenames(model, crowd_loader, device)
 
-    # Concatenate all errors and create true labels
-    all_errors = np.concatenate([normal_errors, anomaly_errors])
-    # True labels: 0 for normal, 1 for anomaly
-    true_labels = np.concatenate(
-        [np.zeros(len(normal_errors)), np.ones(len(anomaly_errors))]
-    )
+    if len(crowd_errors) > len(waldo_errors) * 5:
+        crowd_errors = crowd_errors[: len(waldo_errors) * 5]
 
-    X = all_errors.reshape(-1, 1)
-    y = true_labels
+    print(f"Waldo Mean Error: {np.mean(waldo_errors):.2f}")
+    print(f"Crowd Mean Error: {np.mean(crowd_errors):.2f}")
 
-    # Scale the errors (recommended for Logistic Regression)
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    # --- FIND THE BAD WALDO ---
+    print("\n--- TOP 5 WORST WALDO IMAGES (Highest Error) ---")
+    bad_indices = np.argsort(waldo_errors)[::-1][:5]
+    for i in bad_indices:
+        print(
+            f"Error: {waldo_errors[i]:.2f} | File: {os.path.basename(waldo_files[i])}"
+        )
+    print("------------------------------------------------\n")
 
-    # Train the model (using the full test set as the final evaluation is based on it)
-    log_reg = LogisticRegression(class_weight="balanced", solver="liblinear")
-    log_reg.fit(X_scaled, y)
-
-    # Predict using the Logistic Regression model
-    predicted_labels = log_reg.predict(X_scaled)
-
-    # --- 3. PLOT ERROR DISTRIBUTIONS ---
+    # --- PLOTS & METRICS ---
     plt.figure(figsize=(10, 6))
     plt.hist(
-        normal_errors,
+        waldo_errors,
         bins=50,
-        alpha=0.6,
-        label="Normal (NotWaldo) Errors",
+        alpha=0.7,
+        label="Waldo (Trained)",
         density=True,
+        color="orange",
     )
     plt.hist(
-        anomaly_errors, bins=50, alpha=0.6, label="Anomaly (Waldo) Errors", density=True
+        crowd_errors,
+        bins=50,
+        alpha=0.6,
+        label="Crowd (Unknown)",
+        density=True,
+        color="tab:blue",
     )
+
+    threshold = scoreatpercentile(waldo_errors, 95)
     plt.axvline(
-        x=THRESHOLD,
-        color="r",
-        linestyle="--",
-        label=f"Stat. Threshold ({THRESHOLD:.2f})",
+        threshold, color="r", linestyle="--", label=f"Threshold ({threshold:.0f})"
     )
     plt.title("Reconstruction Error Distribution")
-    plt.xlabel("Total Reconstruction Error")
-    plt.ylabel("Density")
     plt.legend()
     plt.show()
 
-    # --- 4. METRICS ---
+    y_true = np.concatenate([np.ones(len(waldo_errors)), np.zeros(len(crowd_errors))])
+    y_scores = np.concatenate([-waldo_errors, -crowd_errors])
 
-    # 1. AUC-ROC Score
-    auc_roc = roc_auc_score(true_labels, all_errors)
+    waldo_preds = (waldo_errors < threshold).astype(int)
+    crowd_preds = (crowd_errors < threshold).astype(int)
+    y_pred = np.concatenate([waldo_preds, crowd_preds])
 
-    # 2. Confusion Matrix using Logistic Regression predictions
-    cm = confusion_matrix(true_labels, predicted_labels)
-    tn, fp, fn, tp = cm.ravel()
+    cm = confusion_matrix(y_true, y_pred)
+    print("\n--- Confusion Matrix ---")
+    print(cm)
 
-    # 3. F1 Score
-    f1 = f1_score(true_labels, predicted_labels)
-
-    print("\n--- Model Performance (Using Logistic Regression Threshold) ---")
-    print(f"AUC-ROC Score: {auc_roc:.4f} (Closer to 1.0 is better)")
-    print(f"F1 Score: {f1:.4f}")
-    print(f"\nConfusion Matrix:\n{cm}")
-    print(f"True Positives (Correct Waldo patches): {tp}")
-    print(f"False Positives (NotWaldo flagged as Waldo): {fp}")
-    print(f"False Negatives (Waldo missed): {fn}")
-    print(f"True Negatives (Correct NotWaldo patches): {tn}")
+    auc = roc_auc_score(y_true, y_scores)
+    print(f"\nAUC-ROC Score: {auc:.4f}")
 
 
-normal_test_loader, anomaly_test_loader = get_test_dataloaders(
-    TRAIN_DATA_PATH, TEST_DATA_PATH, TEST_TRANSFORM, BATCH_SIZE
-)
+if __name__ == "__main__":
+    model = ShallowConvAutoencoder(latent_dim=64, image_size=IMAGE_SIZE, channels=3)
 
+    # CRITICAL FIX: Move model to device explicitly
+    model.to(DEVICE)
 
-evaluate_model(trained_model, normal_test_loader, anomaly_test_loader, DEVICE)
+    # Load the model
+    try:
+        model.load_state_dict(torch.load("best_waldo_model.pth", map_location=DEVICE))
+        print("Loaded model from disk.")
+    except FileNotFoundError:
+        print("No saved model found. Training from scratch...")
+        model = train(model, REAL_TRAIN_PATH, NUM_EPOCHS, DEVICE)
+
+    evaluate(model, REAL_TRAIN_PATH, REAL_TEST_PATH, DEVICE)
