@@ -33,6 +33,7 @@ LEARNING_RATE: float = 1e-3
 NUM_EPOCHS: int = 200
 WEIGHT_DECAY: float = 1e-4
 
+# Keep the exact transforms you used to get that 0.93 score
 TRAIN_TRANSFORM = transforms.Compose(
     [
         transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
@@ -78,14 +79,10 @@ class WaldoImageDataset(Dataset):
         try:
             image = Image.open(img_path).convert("RGB")
         except Exception:
-            # Return dummy if broken
-            return torch.zeros(3, 64, 64), torch.zeros(3, 64, 64), img_path
-
+            return torch.zeros(3, 64, 64), torch.zeros(3, 64, 64)
         if self.transform:
             image = self.transform(image)
-
-        # Return Path for debugging
-        return image, image, img_path
+        return image, image
 
 
 # ==========================================
@@ -127,6 +124,7 @@ def train(model, data_root, epochs, device):
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=15
     )
@@ -137,7 +135,7 @@ def train(model, data_root, epochs, device):
     for epoch in range(epochs):
         model.train()
         train_loss = 0.0
-        for images, _, _ in train_loader:
+        for images, _ in train_loader:
             images = images.to(device)
             optimizer.zero_grad()
             outputs = model(images)
@@ -151,7 +149,7 @@ def train(model, data_root, epochs, device):
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for val_images, _, _ in val_loader:
+            for val_images, _ in val_loader:
                 val_images = val_images.to(device)
                 val_outputs = model(val_images)
                 val_loss += criterion(val_outputs, val_images).item()
@@ -176,27 +174,22 @@ def train(model, data_root, epochs, device):
 
 
 # ==========================================
-# 4. EVALUATION (DEBUG MODE)
+# 4. EVALUATION (UPDATED WITH CONFUSION MATRIX)
 # ==========================================
 
 
-def calculate_errors_with_filenames(model, dataloader, device):
+def calculate_errors(model, dataloader, device):
     model.eval()
     errors = []
-    filenames = []
     criterion = nn.MSELoss(reduction="none")
-
     with torch.no_grad():
-        for images, _, paths in dataloader:
+        for images, _ in dataloader:
             images = images.to(device)
             reconstructed = model(images)
             pixel_loss = criterion(reconstructed, images)
             loss = pixel_loss.sum(dim=[1, 2, 3])
-
             errors.extend(loss.cpu().numpy())
-            filenames.extend(paths)
-
-    return np.array(errors), np.array(filenames)
+    return np.array(errors)
 
 
 def evaluate(model, waldo_path, crowd_path, device):
@@ -207,27 +200,17 @@ def evaluate(model, waldo_path, crowd_path, device):
     crowd_loader = DataLoader(crowd_set, batch_size=32, shuffle=True)
 
     print("\nCalculating Errors...")
-    waldo_errors, waldo_files = calculate_errors_with_filenames(
-        model, waldo_loader, device
-    )
-    crowd_errors, _ = calculate_errors_with_filenames(model, crowd_loader, device)
+    waldo_errors = calculate_errors(model, waldo_loader, device)
+    crowd_errors = calculate_errors(model, crowd_loader, device)
 
+    # Balance dataset for clean visualization
     if len(crowd_errors) > len(waldo_errors) * 5:
         crowd_errors = crowd_errors[: len(waldo_errors) * 5]
 
     print(f"Waldo Mean Error: {np.mean(waldo_errors):.2f}")
     print(f"Crowd Mean Error: {np.mean(crowd_errors):.2f}")
 
-    # --- FIND THE BAD WALDO ---
-    print("\n--- TOP 5 WORST WALDO IMAGES (Highest Error) ---")
-    bad_indices = np.argsort(waldo_errors)[::-1][:5]
-    for i in bad_indices:
-        print(
-            f"Error: {waldo_errors[i]:.2f} | File: {os.path.basename(waldo_files[i])}"
-        )
-    print("------------------------------------------------\n")
-
-    # --- PLOTS & METRICS ---
+    # --- 1. HISTOGRAM ---
     plt.figure(figsize=(10, 6))
     plt.hist(
         waldo_errors,
@@ -246,25 +229,50 @@ def evaluate(model, waldo_path, crowd_path, device):
         color="tab:blue",
     )
 
+    # Set Threshold at 95th percentile of Waldo (Captures 95% of Waldos)
     threshold = scoreatpercentile(waldo_errors, 95)
     plt.axvline(
         threshold, color="r", linestyle="--", label=f"Threshold ({threshold:.0f})"
     )
     plt.title("Reconstruction Error Distribution")
+    plt.xlabel("Error (Lower = Waldo)")
     plt.legend()
     plt.show()
 
+    # --- 2. CONFUSION MATRIX ---
+    # Create Ground Truth Labels
+    # Waldo = 1, Crowd = 0
     y_true = np.concatenate([np.ones(len(waldo_errors)), np.zeros(len(crowd_errors))])
-    y_scores = np.concatenate([-waldo_errors, -crowd_errors])
 
+    # Create Predictions based on Threshold
+    # If Error < Threshold -> Predict 1 (Waldo)
+    # If Error > Threshold -> Predict 0 (Crowd)
     waldo_preds = (waldo_errors < threshold).astype(int)
     crowd_preds = (crowd_errors < threshold).astype(int)
     y_pred = np.concatenate([waldo_preds, crowd_preds])
 
+    # Calculate Matrix
     cm = confusion_matrix(y_true, y_pred)
-    print("\n--- Confusion Matrix ---")
-    print(cm)
+    tn, fp, fn, tp = cm.ravel()
 
+    print("\n--- Confusion Matrix ---")
+    print(f"Threshold: {threshold:.2f}")
+    print(f"True Positives (Waldo detected): {tp}")
+    print(f"False Negatives (Waldo missed): {fn}")
+    print(f"True Negatives (Crowd ignored): {tn}")
+    print(f"False Positives (Crowd flagged as Waldo): {fp}")
+
+    # Visualize Matrix
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm, display_labels=["Crowd", "Waldo"]
+    )
+    disp.plot(cmap=plt.cm.Blues)
+    plt.title("Confusion Matrix")
+    plt.show()
+
+    # --- 3. AUC SCORE ---
+    # Inverted logic: Pass negative error so Higher Score = Waldo
+    y_scores = np.concatenate([-waldo_errors, -crowd_errors])
     auc = roc_auc_score(y_true, y_scores)
     print(f"\nAUC-ROC Score: {auc:.4f}")
 
@@ -272,15 +280,9 @@ def evaluate(model, waldo_path, crowd_path, device):
 if __name__ == "__main__":
     model = ShallowConvAutoencoder(latent_dim=64, image_size=IMAGE_SIZE, channels=3)
 
-    # CRITICAL FIX: Move model to device explicitly
-    model.to(DEVICE)
+    # Since you just trained a great model, you might want to comment out training
+    # and just load the saved one if you don't want to wait 200 epochs again.
+    # model.load_state_dict(torch.load('best_waldo_model.pth'))
 
-    # Load the model
-    try:
-        model.load_state_dict(torch.load("best_waldo_model.pth", map_location=DEVICE))
-        print("Loaded model from disk.")
-    except FileNotFoundError:
-        print("No saved model found. Training from scratch...")
-        model = train(model, REAL_TRAIN_PATH, NUM_EPOCHS, DEVICE)
-
-    evaluate(model, REAL_TRAIN_PATH, REAL_TEST_PATH, DEVICE)
+    trained_model = train(model, REAL_TRAIN_PATH, NUM_EPOCHS, DEVICE)
+    evaluate(trained_model, REAL_TRAIN_PATH, REAL_TEST_PATH, DEVICE)
