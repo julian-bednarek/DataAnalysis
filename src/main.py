@@ -30,7 +30,7 @@ REAL_TEST_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE['file']}/notwal
 
 BATCH_SIZE: int = 32
 LEARNING_RATE: float = 1e-3
-NUM_EPOCHS: int = 200
+NUM_EPOCHS: int = 120
 WEIGHT_DECAY: float = 1e-4
 
 # Keep the exact transforms you used to get that 0.93 score
@@ -98,8 +98,39 @@ def train(model, data_root, epochs, device):
         if f.endswith(IMAGE_EXTENSION)
     ]
     random.shuffle(all_files)
+    print(all_files)
 
-    val_count = max(2, int(0.1 * len(all_files)))
+    all_files = [
+        "../datasets/Hey-Waldo/128/waldo/5_3_1.jpg",
+        "../datasets/Hey-Waldo/128/waldo/4_1_6.jpg",
+        "../datasets/Hey-Waldo/128/waldo/16_5_2.jpg",
+        "../datasets/Hey-Waldo/128/waldo/5_1_2.jpg",
+        "../datasets/Hey-Waldo/128/waldo/19_0_3.jpg",
+        "../datasets/Hey-Waldo/128/waldo/13_2_1.jpg",
+        "../datasets/Hey-Waldo/128/waldo/1_2_3.jpg",
+        "../datasets/Hey-Waldo/128/waldo/18_1_7.jpg",
+        "../datasets/Hey-Waldo/128/waldo/13_1_5.jpg",
+        "../datasets/Hey-Waldo/128/waldo/9_2_2.jpg",
+        "../datasets/Hey-Waldo/128/waldo/17_6_2.jpg",
+        "../datasets/Hey-Waldo/128/waldo/6_7_0.jpg",
+        "../datasets/Hey-Waldo/128/waldo/4_1_5.jpg",
+        "../datasets/Hey-Waldo/128/waldo/14_0_6.jpg",
+        "../datasets/Hey-Waldo/128/waldo/13_3_1.jpg",
+        "../datasets/Hey-Waldo/128/waldo/3_7_0.jpg",
+        "../datasets/Hey-Waldo/128/waldo/18_7_3.jpg",
+        "../datasets/Hey-Waldo/128/waldo/12_1_6.jpg",
+        "../datasets/Hey-Waldo/128/waldo/2_3_1.jpg",
+        "../datasets/Hey-Waldo/128/waldo/10_7_2.jpg",
+        "../datasets/Hey-Waldo/128/waldo/11_3_5.jpg",
+        "../datasets/Hey-Waldo/128/waldo/9_0_5.jpg",
+        "../datasets/Hey-Waldo/128/waldo/9_0_6.jpg",
+        "../datasets/Hey-Waldo/128/waldo/7_6_2.jpg",
+        "../datasets/Hey-Waldo/128/waldo/17_1_5.jpg",
+        "../datasets/Hey-Waldo/128/waldo/13_0_0.jpg",
+        "../datasets/Hey-Waldo/128/waldo/2_1_2.jpg",
+    ]
+
+    val_count = max(2, int(0.2 * len(all_files)))
     train_files = all_files[val_count:]
     val_files = all_files[:val_count]
 
@@ -174,7 +205,7 @@ def train(model, data_root, epochs, device):
 
 
 # ==========================================
-# 4. EVALUATION (UPDATED WITH CONFUSION MATRIX)
+# 4. EVALUATION
 # ==========================================
 
 
@@ -229,7 +260,7 @@ def evaluate(model, waldo_path, crowd_path, device):
         color="tab:blue",
     )
 
-    # Set Threshold at 95th percentile of Waldo (Captures 95% of Waldos)
+    # Set Threshold at 95th percentile of Waldo
     threshold = scoreatpercentile(waldo_errors, 95)
     plt.axvline(
         threshold, color="r", linestyle="--", label=f"Threshold ({threshold:.0f})"
@@ -240,18 +271,11 @@ def evaluate(model, waldo_path, crowd_path, device):
     plt.show()
 
     # --- 2. CONFUSION MATRIX ---
-    # Create Ground Truth Labels
-    # Waldo = 1, Crowd = 0
     y_true = np.concatenate([np.ones(len(waldo_errors)), np.zeros(len(crowd_errors))])
-
-    # Create Predictions based on Threshold
-    # If Error < Threshold -> Predict 1 (Waldo)
-    # If Error > Threshold -> Predict 0 (Crowd)
     waldo_preds = (waldo_errors < threshold).astype(int)
     crowd_preds = (crowd_errors < threshold).astype(int)
     y_pred = np.concatenate([waldo_preds, crowd_preds])
 
-    # Calculate Matrix
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
 
@@ -262,7 +286,6 @@ def evaluate(model, waldo_path, crowd_path, device):
     print(f"True Negatives (Crowd ignored): {tn}")
     print(f"False Positives (Crowd flagged as Waldo): {fp}")
 
-    # Visualize Matrix
     disp = ConfusionMatrixDisplay(
         confusion_matrix=cm, display_labels=["Crowd", "Waldo"]
     )
@@ -271,7 +294,6 @@ def evaluate(model, waldo_path, crowd_path, device):
     plt.show()
 
     # --- 3. AUC SCORE ---
-    # Inverted logic: Pass negative error so Higher Score = Waldo
     y_scores = np.concatenate([-waldo_errors, -crowd_errors])
     auc = roc_auc_score(y_true, y_scores)
     print(f"\nAUC-ROC Score: {auc:.4f}")
@@ -280,9 +302,16 @@ def evaluate(model, waldo_path, crowd_path, device):
 if __name__ == "__main__":
     model = ShallowConvAutoencoder(latent_dim=64, image_size=IMAGE_SIZE, channels=3)
 
-    # Since you just trained a great model, you might want to comment out training
-    # and just load the saved one if you don't want to wait 200 epochs again.
+    # To load a previously trained model uncomment the next line:
     # model.load_state_dict(torch.load('best_waldo_model.pth'))
 
     trained_model = train(model, REAL_TRAIN_PATH, NUM_EPOCHS, DEVICE)
     evaluate(trained_model, REAL_TRAIN_PATH, REAL_TEST_PATH, DEVICE)
+
+    # --- EXPLICIT FINAL SAVE ---
+    final_save_path = "waldo_detector_final.pth"
+    torch.save(trained_model.state_dict(), final_save_path)
+    print(f"\n✅ Final model saved successfully to: {final_save_path}")
+    print(
+        "You can load it later using: model.load_state_dict(torch.load('waldo_detector_final.pth'))"
+    )
