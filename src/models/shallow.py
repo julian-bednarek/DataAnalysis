@@ -24,13 +24,13 @@ class ShallowConvAutoencoder(nn.Module):
             nn.BatchNorm2d(32),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
-            nn.Dropout2d(0.1),  # Mild dropout
+            nn.Dropout2d(0.05),  # Mild dropout
             # Block 2
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(True),
             nn.MaxPool2d(2, 2),
-            nn.Dropout2d(0.1),  # Mild dropout
+            nn.Dropout2d(0.05),  # Mild dropout
         )
 
         self.fc_encoder = nn.Linear(self.flat_size, latent_dim)
