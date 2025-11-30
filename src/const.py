@@ -12,7 +12,7 @@ class ImageTypes(Enum):
     GRAY = {"file": "-gray", "no_channels": 1}
 
 
-IMAGE_SIZE = 128
+IMAGE_SIZE = 64
 IMAGE_TYPE = ImageTypes.NORMAL.value
 IMAGE_EXTENSION = ".jpg"
 TRAIN_DATA_PATH = f"../datasets/Hey-Waldo/{IMAGE_SIZE}{IMAGE_TYPE['file']}/notwaldo"

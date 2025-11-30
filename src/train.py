@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, RandomSampler
 
 from const import *
-from models import ShallowConvAutoencoder
+from models import *
 from dataset import WaldoImageDataset, TRAIN_TRANSFORM, TEST_TRANSFORM
 
 Model = ShallowConvAutoencoder
@@ -26,7 +26,7 @@ def train(model, data_root, epochs, device):
     ]
     random.shuffle(all_files)
 
-    val_count = max(2, int(0.2 * len(all_files)))
+    val_count = max(2, int(0.1 * len(all_files)))
     train_files = all_files[val_count:]
     val_files = all_files[:val_count]
 
@@ -40,7 +40,7 @@ def train(model, data_root, epochs, device):
         data_root, file_list=val_files, transform=TEST_TRANSFORM
     )
 
-    train_sampler = RandomSampler(train_dataset, replacement=True, num_samples=2000)
+    train_sampler = RandomSampler(train_dataset, replacement=True, num_samples=3500)
 
     train_loader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler
@@ -52,7 +52,7 @@ def train(model, data_root, epochs, device):
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=20
+        optimizer, mode="min", factor=0.7, patience=5
     )
 
     model.to(device)
